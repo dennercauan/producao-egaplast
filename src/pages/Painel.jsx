@@ -1,150 +1,588 @@
 import React, { useState, useEffect } from 'react';
-import { collection, addDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { collection, addDoc, onSnapshot, serverTimestamp, query, orderBy, updateDoc, doc, deleteDoc } from 'firebase/firestore';
 import { db } from '../services/firebase';
 
 export default function Painel() {
-  const [demandas, setDemandas] = useState([]);
-  
-  // Estados para os campos do formulário
-  const [item, setItem] = useState('');
-  const [colaborador, setColaborador] = useState('');
-  const [tempoEstimado, setTempoEstimado] = useState('');
+  const [abaAtiva, setAbaAtiva] = useState('romaneios'); 
 
-  // Listener em tempo real do banco de dados
+  // Estados dos Dados
+  const [demandas, setDemandas] = useState([]);
+  const [colaboradores, setColaboradores] = useState([]);
+  const [agora, setAgora] = useState(Date.now());
+
+  // Estados dos Formulários (Criação)
+  const [item, setItem] = useState('');
+  const [quantidade, setQuantidade] = useState('');
+  const [horasEst, setHorasEst] = useState('');
+  const [minutosEst, setMinutosEst] = useState('');
+  const [segundosEst, setSegundosEst] = useState('');
+  const [colabsSelecionados, setColabsSelecionados] = useState([]);
+  const [novoColaborador, setNovoColaborador] = useState('');
+
+  // Estados dos Filtros do Histórico
+  const [filtroBusca, setFiltroBusca] = useState('');
+  const [filtroColab, setFiltroColab] = useState('');
+  const [filtroData, setFiltroData] = useState('');
+  const [ordenacao, setOrdenacao] = useState('recentes');
+
+  // Estado do Modal de Edição
+  const [romaneioEditando, setRomaneioEditando] = useState(null);
+
+  // 1. Listeners do Firebase
   useEffect(() => {
-    // Escuta a coleção 'romaneios_ativos' no Firestore
-    const unsubscribe = onSnapshot(collection(db, 'romaneios_ativos'), (snapshot) => {
-      const listaDemandas = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setDemandas(listaDemandas);
+    const qRomaneios = query(collection(db, 'romaneios_ativos'), orderBy('criadoEm', 'desc'));
+    const unsubRomaneios = onSnapshot(qRomaneios, (snapshot) => {
+      setDemandas(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    // Limpa a escuta quando o componente é desmontado
-    return () => unsubscribe();
+    const qColaboradores = query(collection(db, 'colaboradores'), orderBy('nome', 'asc'));
+    const unsubColaboradores = onSnapshot(qColaboradores, (snapshot) => {
+      setColaboradores(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    });
+
+    const timer = setInterval(() => setAgora(Date.now()), 1000);
+    return () => {
+      unsubRomaneios();
+      unsubColaboradores();
+      clearInterval(timer);
+    };
   }, []);
+
+  // 2. Gestão de Equipe
+  const adicionarColaborador = async (e) => {
+    e.preventDefault();
+    if (!novoColaborador) return;
+    try {
+      await addDoc(collection(db, 'colaboradores'), { nome: novoColaborador });
+      setNovoColaborador('');
+    } catch (error) { console.error("Erro:", error); }
+  };
+
+  const editarColaborador = async (id, nomeAntigo) => {
+    const novoNome = window.prompt("Corrigir nome do colaborador:", nomeAntigo);
+    if (novoNome && novoNome.trim() !== "" && novoNome.trim() !== nomeAntigo) {
+      try {
+        await updateDoc(doc(db, 'colaboradores', id), { nome: novoNome.trim() });
+      } catch (error) { console.error("Erro ao editar colaborador:", error); }
+    }
+  };
+
+  const removerColaborador = async (id) => {
+    if (window.confirm("Remover este colaborador permanentemente?")) {
+      await deleteDoc(doc(db, 'colaboradores', id));
+    }
+  };
+
+  const toggleColaborador = (nome) => {
+    setColabsSelecionados(prev => prev.includes(nome) ? prev.filter(n => n !== nome) : [...prev, nome]);
+  };
 
   const adicionarDemanda = async (e) => {
     e.preventDefault();
-    if (!item || !colaborador || !tempoEstimado) return;
+    const h = Number(horasEst) || 0;
+    const m = Number(minutosEst) || 0;
+    const s = Number(segundosEst) || 0;
+
+    if (!item || !quantidade || colabsSelecionados.length === 0) return alert("Preencha item, quantidade e selecione a equipe.");
+    if (h === 0 && m === 0 && s === 0) return alert("Insira um tempo estimado maior que zero.");
+
+    const tempoFormatadoStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    const tempoCalculadoMin = (h * 60) + m + (s / 60);
 
     try {
       await addDoc(collection(db, 'romaneios_ativos'), {
         item,
-        colaborador,
-        tempoEstimado: Number(tempoEstimado),
+        quantidade: Number(quantidade),
+        equipe: colabsSelecionados,
+        tempoEstimadoStr: tempoFormatadoStr,
+        tempoEstimado: tempoCalculadoMin,
         status: 'Em Andamento',
+        horaInicioStr: Date.now(),
+        tempoPausadoTotalMs: 0,
+        historicoPausas: [], // <-- Criamos a lista vazia de pausas aqui
         criadoEm: serverTimestamp()
       });
-      
-      // Limpa o formulário após salvar
       setItem('');
-      setColaborador('');
-      setTempoEstimado('');
-    } catch (error) {
-      console.error("Erro ao inserir romaneio: ", error);
-      alert("Erro ao conectar com o banco de dados.");
+      setQuantidade('');
+      setHorasEst(''); setMinutosEst(''); setSegundosEst('');
+      setColabsSelecionados([]);
+    } catch (error) { console.error("Erro:", error); }
+  };
+
+  const excluirRomaneio = async (id) => {
+    if (window.confirm("Atenção: Tem certeza que deseja excluir este romaneio do sistema? Essa ação não pode ser desfeita.")) {
+      await deleteDoc(doc(db, 'romaneios_ativos', id));
     }
   };
 
+  const abrirModalEdicao = (demanda) => {
+    let h = '', m = '', s = '';
+    if (demanda.tempoEstimadoStr) {
+      const partes = demanda.tempoEstimadoStr.split(':');
+      h = partes[0] || ''; m = partes[1] || ''; s = partes[2] || '';
+    }
+    setRomaneioEditando({
+      ...demanda,
+      editHoras: h,
+      editMinutos: m,
+      editSegundos: s
+    });
+  };
+
+  const salvarEdicao = async (e) => {
+    e.preventDefault();
+    const h = Number(romaneioEditando.editHoras) || 0;
+    const m = Number(romaneioEditando.editMinutos) || 0;
+    const s = Number(romaneioEditando.editSegundos) || 0;
+
+    if (!romaneioEditando.item || !romaneioEditando.quantidade || romaneioEditando.equipe.length === 0) return alert("Preencha os dados e a equipe.");
+    if (h === 0 && m === 0 && s === 0) return alert("O tempo estimado não pode ser zero.");
+
+    const tempoFormatadoStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    const tempoCalculadoMin = (h * 60) + m + (s / 60);
+
+    try {
+      await updateDoc(doc(db, 'romaneios_ativos', romaneioEditando.id), {
+        item: romaneioEditando.item,
+        quantidade: Number(romaneioEditando.quantidade),
+        tempoEstimadoStr: tempoFormatadoStr,
+        tempoEstimado: tempoCalculadoMin,
+        equipe: romaneioEditando.equipe
+      });
+      setRomaneioEditando(null); 
+    } catch (error) { console.error("Erro ao editar:", error); }
+  };
+
+  const toggleColaboradorEdicao = (nome) => {
+    setRomaneioEditando(prev => {
+      const novaEquipe = prev.equipe.includes(nome) ? prev.equipe.filter(n => n !== nome) : [...prev.equipe, nome];
+      return { ...prev, equipe: novaEquipe };
+    });
+  };
+
+  const alterarStatusRomaneio = async (demanda, novoStatus) => {
+    try {
+      const dadosAtualizacao = { status: novoStatus };
+      
+      if (novoStatus === 'Pausado') {
+        const motivo = window.prompt("Qual o motivo da pausa?");
+        if (!motivo) return; 
+        dadosAtualizacao.motivoPausa = motivo;
+        dadosAtualizacao.inicioUltimaPausa = Date.now();
+      } 
+      else if (novoStatus === 'Em Andamento' && demanda.status === 'Pausado') {
+        const tempoDestaPausa = Date.now() - (demanda.inicioUltimaPausa || Date.now());
+        dadosAtualizacao.tempoPausadoTotalMs = (demanda.tempoPausadoTotalMs || 0) + tempoDestaPausa;
+        
+        // <-- Adiciona a pausa ao histórico
+        const novaPausa = {
+          motivo: demanda.motivoPausa || 'Não informado',
+          duracaoMs: tempoDestaPausa,
+          dataFim: Date.now()
+        };
+        dadosAtualizacao.historicoPausas = [...(demanda.historicoPausas || []), novaPausa];
+
+        dadosAtualizacao.motivoPausa = null;
+        dadosAtualizacao.inicioUltimaPausa = null;
+      }
+      else if (novoStatus === 'Concluído') {
+        if (window.confirm("Deseja concluir este romaneio e enviá-lo para o histórico?")) {
+          let tempoPausaFinal = demanda.tempoPausadoTotalMs || 0;
+          let historicoAtualizado = [...(demanda.historicoPausas || [])];
+
+          // Se concluiu enquanto estava pausado, grava essa última pausa também
+          if (demanda.status === 'Pausado' && demanda.inicioUltimaPausa) {
+            const tempoDestaPausa = Date.now() - demanda.inicioUltimaPausa;
+            tempoPausaFinal += tempoDestaPausa;
+            historicoAtualizado.push({
+              motivo: demanda.motivoPausa || 'Não informado',
+              duracaoMs: tempoDestaPausa,
+              dataFim: Date.now()
+            });
+          }
+          
+          dadosAtualizacao.tempoPausadoTotalMs = tempoPausaFinal;
+          dadosAtualizacao.historicoPausas = historicoAtualizado; // <-- Guarda no banco
+          dadosAtualizacao.tempoTotalDecorridoMs = Date.now() - demanda.horaInicioStr;
+          dadosAtualizacao.tempoAtivoMs = dadosAtualizacao.tempoTotalDecorridoMs - tempoPausaFinal;
+          dadosAtualizacao.finalizadoEm = serverTimestamp();
+
+          const tempoRealMin = dadosAtualizacao.tempoAtivoMs / 60000;
+          const tempoEstMin = demanda.tempoEstimado || 0;
+          let produtividadePorcentagem = 100;
+          
+          if (tempoRealMin > 0) {
+            produtividadePorcentagem = Math.round((tempoEstMin / tempoRealMin) * 100);
+          }
+          dadosAtualizacao.produtividadePorcentagem = produtividadePorcentagem;
+
+        } else {
+          return;
+        }
+      }
+
+      await updateDoc(doc(db, 'romaneios_ativos', demanda.id), dadosAtualizacao);
+    } catch (error) { console.error("Erro ao atualizar:", error); }
+  };
+
+  const retomarRomaneioConcluido = async (demanda) => {
+    if (window.confirm("Deseja reabrir este romaneio? Ele retornará para a lista de itens ativos e o cronômetro continuará a contagem.")) {
+      try {
+        await updateDoc(doc(db, 'romaneios_ativos', demanda.id), {
+          status: 'Em Andamento',
+          finalizadoEm: null,
+          tempoTotalDecorridoMs: null,
+          tempoAtivoMs: null,
+          produtividadePorcentagem: null // Limpa a produtividade calculada
+        });
+      } catch (error) { console.error("Erro ao retomar:", error); }
+    }
+  };
+
+  const formatarTempoMs = (ms) => {
+    if (!ms || ms < 0) return "00:00:00";
+    const totalSeg = Math.floor(ms / 1000);
+    const h = Math.floor(totalSeg / 3600).toString().padStart(2, '0');
+    const m = Math.floor((totalSeg % 3600) / 60).toString().padStart(2, '0');
+    const s = (totalSeg % 60).toString().padStart(2, '0');
+    return `${h}:${m}:${s}`;
+  };
+
+  const getTempoCronometroMs = (demanda) => {
+    if (!demanda.horaInicioStr) return 0;
+    let ms = agora - demanda.horaInicioStr - (demanda.tempoPausadoTotalMs || 0);
+    if (demanda.status === 'Pausado' && demanda.inicioUltimaPausa) {
+      ms -= (agora - demanda.inicioUltimaPausa);
+    }
+    return ms > 0 ? ms : 0;
+  };
+
+  const dataParaStringYMD = (timestamp) => {
+    if (!timestamp || typeof timestamp.toDate !== 'function') return null;
+    const d = timestamp.toDate();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
+  const romaneiosAtivos = demandas.filter(d => d.status !== 'Concluído');
+  
+  let historicoFiltrado = demandas.filter(d => d.status === 'Concluído').filter(d => {
+    const matchBusca = d.item.toLowerCase().includes(filtroBusca.toLowerCase());
+    const matchColab = filtroColab === '' || (d.equipe && d.equipe.some(c => c.toLowerCase().includes(filtroColab.toLowerCase())));
+    const matchData = filtroData === '' || dataParaStringYMD(d.finalizadoEm) === filtroData;
+    return matchBusca && matchColab && matchData;
+  });
+
+  historicoFiltrado.sort((a, b) => {
+    if (ordenacao === 'qtd') return b.quantidade - a.quantidade;
+    if (ordenacao === 'duracao') return b.tempoAtivoMs - a.tempoAtivoMs;
+    if (ordenacao === 'agilidade') {
+      const prodA = a.produtividadePorcentagem || 0;
+      const prodB = b.produtividadePorcentagem || 0;
+      return prodB - prodA; // Ordena pela porcentagem maior
+    }
+    const timeA = a.finalizadoEm?.toMillis() || 0;
+    const timeB = b.finalizadoEm?.toMillis() || 0;
+    return timeB - timeA;
+  });
+
   return (
-    <div className="flex flex-col h-full p-6 bg-slate-900">
-      <header className="mb-6 flex justify-between items-center">
-        <h1 className="text-2xl font-bold text-white">Gestão de Romaneios</h1>
+    <div className="flex flex-col h-full p-8 bg-gray-100 relative">
+      
+      <header className="mb-6 flex justify-between items-end border-b border-gray-300 pb-2">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-800">Painel de Controle</h1>
+          <p className="text-sm text-gray-500 mt-1">Gestão operacional da produção</p>
+        </div>
+        <div className="flex space-x-2">
+          <button onClick={() => setAbaAtiva('romaneios')} className={`px-4 py-2 rounded-t-lg font-bold transition-colors ${abaAtiva === 'romaneios' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>Romaneios</button>
+          <button onClick={() => setAbaAtiva('historico')} className={`px-4 py-2 rounded-t-lg font-bold transition-colors ${abaAtiva === 'historico' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>Histórico</button>
+          <button onClick={() => setAbaAtiva('equipe')} className={`px-4 py-2 rounded-t-lg font-bold transition-colors ${abaAtiva === 'equipe' ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>Colaboradores</button>
+        </div>
       </header>
 
-      {/* Formulário */}
-      <div className="bg-slate-800 p-4 rounded-t-lg border border-slate-700">
-        <form className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end" onSubmit={adicionarDemanda}>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Item / SKU</label>
-            <input 
-              type="text" 
-              value={item}
-              onChange={(e) => setItem(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:outline-none focus:border-blue-500" 
-              placeholder="Ex: Tubo PVC" 
-              required 
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Colaboradores</label>
-            <input 
-              type="text" 
-              value={colaborador}
-              onChange={(e) => setColaborador(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:outline-none focus:border-blue-500" 
-              placeholder="Nomes" 
-              required 
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Tempo Est. (min)</label>
-            <input 
-              type="number" 
-              value={tempoEstimado}
-              onChange={(e) => setTempoEstimado(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:outline-none focus:border-blue-500" 
-              placeholder="120" 
-              required 
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Ação</label>
-            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 px-4 rounded transition-colors">
-              Iniciar Produção
-            </button>
-          </div>
-        </form>
-      </div>
+      {/* ================= ABA: ROMANEIOS ATIVOS ================= */}
+      {abaAtiva === 'romaneios' && (
+        <>
+          <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm z-10 mb-4">
+            <form className="flex flex-col gap-4" onSubmit={adicionarDemanda}>
+              <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-start">
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Item / SKU</label>
+                  <input type="text" value={item} onChange={(e) => setItem(e.target.value)} className="w-full bg-gray-50 border border-gray-300 rounded px-4 py-2 text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ex: Tubo PVC 100mm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Qtd. Peças</label>
+                  <input type="number" value={quantidade} onChange={(e) => setQuantidade(e.target.value)} className="w-full bg-gray-50 border border-gray-300 rounded px-4 py-2 text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="Ex: 500" />
+                </div>
+                
+                <div className="md:col-span-2">
+                  <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Tempo Estimado</label>
+                  <div className="flex gap-2 items-center">
+                    <div className="flex flex-col">
+                      <input type="number" min="0" placeholder="HH" value={horasEst} onChange={(e) => setHorasEst(e.target.value)} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">HORAS</span>
+                    </div>
+                    <span className="font-bold text-gray-400 mb-4">:</span>
+                    <div className="flex flex-col">
+                      <input type="number" min="0" max="59" placeholder="MM" value={minutosEst} onChange={(e) => setMinutosEst(e.target.value)} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">MIN</span>
+                    </div>
+                    <span className="font-bold text-gray-400 mb-4">:</span>
+                    <div className="flex flex-col">
+                      <input type="number" min="0" max="59" placeholder="SS" value={segundosEst} onChange={(e) => setSegundosEst(e.target.value)} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">SEG</span>
+                    </div>
+                  </div>
+                </div>
 
-      {/* Tabela Simplificada */}
-      <div className="flex-1 bg-slate-800 border border-t-0 border-slate-700 rounded-b-lg overflow-hidden flex flex-col">
-        <div className="overflow-y-auto flex-1 p-0">
-          <table className="w-full text-left text-sm text-slate-300">
-            <thead className="text-xs uppercase bg-slate-900 text-slate-400 sticky top-0">
-              <tr>
-                <th className="px-4 py-3">Item</th>
-                <th className="px-4 py-3">Colaboradores</th>
-                <th className="px-4 py-3 text-center">Tempo Estimado</th>
-                <th className="px-4 py-3 text-center">Status</th>
-                <th className="px-4 py-3 text-right">Controles</th>
-              </tr>
-            </thead>
-            <tbody>
-              {demandas.length === 0 ? (
-                <tr>
-                  <td colSpan="5" className="px-4 py-8 text-center text-slate-500">
-                    Nenhum romaneio ativo no momento.
-                  </td>
-                </tr>
-              ) : (
-                demandas.map((demanda) => (
-                  <tr key={demanda.id} className="border-b border-slate-700 hover:bg-slate-750">
-                    <td className="px-4 py-3 font-medium text-white">{demanda.item}</td>
-                    <td className="px-4 py-3">{demanda.colaborador}</td>
-                    <td className="px-4 py-3 text-center text-blue-400 font-bold">{demanda.tempoEstimado} min</td>
-                    <td className="px-4 py-3 text-center">
-                      <span className="bg-green-900/50 text-green-400 text-xs font-bold px-2 py-1 rounded">
-                        {demanda.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right space-x-2">
-                      <button className="bg-orange-600 hover:bg-orange-500 text-white px-3 py-1 rounded text-xs font-bold transition-colors">
-                        Pausar
-                      </button>
-                      <button className="bg-green-600 hover:bg-green-500 text-white px-3 py-1 rounded text-xs font-bold transition-colors">
-                        Concluir
-                      </button>
-                    </td>
+                <div className="flex items-end h-full mt-1 md:mt-0">
+                  <button type="submit" className="w-full h-10 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded shadow-md transition-all uppercase text-sm tracking-wider">
+                    Iniciar
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Selecionar Equipe Envolvida:</label>
+                <div className="flex flex-wrap gap-2">
+                  {colaboradores.length === 0 ? <span className="text-sm text-red-500 italic">Adicione colaboradores na aba "Colaboradores".</span> : null}
+                  {colaboradores.map(colab => (
+                    <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${colabsSelecionados.includes(colab.nome) ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-gray-50 border-gray-300 text-gray-600 hover:bg-gray-100'}`}>
+                      <input type="checkbox" className="hidden" checked={colabsSelecionados.includes(colab.nome)} onChange={() => toggleColaborador(colab.nome)} />
+                      {colab.nome}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <div className="flex-1 bg-white border border-gray-200 rounded shadow-sm overflow-hidden flex flex-col">
+            <div className="overflow-y-auto flex-1">
+              <table className="w-full text-left text-sm text-gray-700">
+                <thead className="bg-gray-50 text-gray-600 sticky top-0 border-b border-gray-200 shadow-sm">
+                  <tr>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs">Item / Equipe</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Qtd.</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Tempo Est.</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Cronômetro</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Status</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-right">Ações</th>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {romaneiosAtivos.length === 0 ? (
+                    <tr><td colSpan="6" className="px-6 py-12 text-center text-gray-400">Nenhuma demanda ativa.</td></tr>
+                  ) : (
+                    romaneiosAtivos.map((demanda) => {
+                      const cronometroMs = getTempoCronometroMs(demanda);
+                      const atrasado = (cronometroMs / 60000) > demanda.tempoEstimado;
+
+                      return (
+                        <tr key={demanda.id} className="hover:bg-blue-50/30 transition-colors">
+                          <td className="px-6 py-3">
+                            <p className="font-semibold text-gray-900">{demanda.item}</p>
+                            <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
+                          </td>
+                          <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
+                          <td className="px-6 py-3 text-center font-bold text-gray-600">{demanda.tempoEstimadoStr}</td>
+                          <td className="px-6 py-3 text-center font-mono font-bold text-lg">
+                            <span className={atrasado && demanda.status === 'Em Andamento' ? 'text-red-500' : 'text-blue-600'}>
+                              {formatarTempoMs(cronometroMs)}
+                            </span>
+                          </td>
+                          <td className="px-6 py-3 text-center">
+                            <span className={`px-3 py-1 text-xs font-bold rounded-full border ${demanda.status === 'Pausado' ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'}`}>
+                              {demanda.status === 'Pausado' && demanda.motivoPausa ? `Pausa: ${demanda.motivoPausa}` : demanda.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
+                            <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-100 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
+                            <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
+                            
+                            {demanda.status === 'Em Andamento' ? (
+                              <button onClick={() => alterarStatusRomaneio(demanda, 'Pausado')} className="text-amber-600 hover:bg-amber-50 px-3 py-1.5 rounded border border-amber-200 text-xs font-bold uppercase transition-colors">Pausar</button>
+                            ) : (
+                              <button onClick={() => alterarStatusRomaneio(demanda, 'Em Andamento')} className="text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors">Retomar</button>
+                            )}
+                            <button onClick={() => alterarStatusRomaneio(demanda, 'Concluído')} className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded text-xs font-bold uppercase shadow-sm transition-colors">Concluir</button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ================= ABA: HISTÓRICO ================= */}
+      {abaAtiva === 'historico' && (
+        <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+          <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-1">Buscar por Item</label>
+              <input type="text" value={filtroBusca} onChange={(e) => setFiltroBusca(e.target.value)} placeholder="Ex: Tubo" className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-1">Colaborador</label>
+              <input type="text" value={filtroColab} onChange={(e) => setFiltroColab(e.target.value)} placeholder="Nome" className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-1">Data de Conclusão</label>
+              <input type="date" value={filtroData} onChange={(e) => setFiltroData(e.target.value)} className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500 text-gray-600" />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-1">Ordenar por</label>
+              <select value={ordenacao} onChange={(e) => setOrdenacao(e.target.value)} className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500 text-gray-700">
+                <option value="recentes">Mais Recentes</option>
+                <option value="qtd">Maior Quantidade</option>
+                <option value="agilidade">Maior Produtividade</option>
+                <option value="duracao">Maior Duração</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex-1 bg-white border border-gray-200 rounded shadow-sm overflow-hidden flex flex-col">
+            <div className="overflow-y-auto flex-1">
+              <table className="w-full text-left text-sm text-gray-700">
+                <thead className="bg-gray-100 text-gray-600 sticky top-0 border-b border-gray-200">
+                  <tr>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs">Item / Equipe</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Qtd.</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Tempo Est.</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center text-blue-700">Tempo Ativo</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center text-amber-600">Pausas</th>
+                    {/* NOVA COLUNA DE PRODUTIVIDADE */}
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center text-indigo-600">Produtividade</th>
+                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {historicoFiltrado.length === 0 ? (
+                    <tr><td colSpan="7" className="px-6 py-12 text-center text-gray-400">Nenhum histórico corresponde aos filtros aplicados.</td></tr>
+                  ) : (
+                    historicoFiltrado.map((demanda) => {
+                      const percentual = demanda.produtividadePorcentagem !== undefined ? demanda.produtividadePorcentagem : 100;
+                      const prodColorClass = percentual >= 100 ? 'text-emerald-600' : 'text-red-500';
+
+                      return (
+                        <tr key={demanda.id} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-6 py-3">
+                            <p className="font-semibold text-gray-900">{demanda.item}</p>
+                            <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
+                          </td>
+                          <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
+                          <td className="px-6 py-3 text-center font-bold text-gray-500">{demanda.tempoEstimadoStr}</td>
+                          <td className="px-6 py-3 text-center font-mono font-bold text-blue-700">{formatarTempoMs(demanda.tempoAtivoMs)}</td>
+                          <td className="px-6 py-3 text-center font-mono font-bold text-amber-600">{formatarTempoMs(demanda.tempoPausadoTotalMs)}</td>
+                          
+                          {/* EXIBIÇÃO DA PRODUTIVIDADE SALVA */}
+                          <td className={`px-6 py-3 text-center font-mono font-black text-lg ${prodColorClass}`}>
+                            {demanda.produtividadePorcentagem !== undefined ? `${demanda.produtividadePorcentagem}%` : 'N/A'}
+                          </td>
+
+                          <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
+                            <button onClick={() => retomarRomaneioConcluido(demanda)} className="text-blue-600 hover:bg-blue-50 px-2.5 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors">Retomar</button>
+                            <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-200 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
+                            <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* ================= ABA: EQUIPE ================= */}
+      {abaAtiva === 'equipe' && (
+        <div className="flex-1 bg-white p-6 rounded-lg border border-gray-200 shadow-sm flex flex-col">
+          <h2 className="text-xl font-bold text-gray-800 mb-4">Adicionar Novo Colaborador</h2>
+          <form onSubmit={adicionarColaborador} className="flex max-w-md mb-8">
+            <input type="text" value={novoColaborador} onChange={(e) => setNovoColaborador(e.target.value)} placeholder="Nome do colaborador" className="flex-1 bg-gray-50 border border-gray-300 rounded-l px-4 py-2 text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500" required />
+            <button type="submit" className="bg-gray-800 hover:bg-gray-900 text-white font-bold px-4 py-2 rounded-r transition-colors">Registrar</button>
+          </form>
+          <h3 className="text-sm font-bold text-gray-500 uppercase tracking-wide mb-3 border-b pb-2">Equipe Registrada ({colaboradores.length})</h3>
+          <div className="flex flex-wrap gap-3 overflow-y-auto">
+            {colaboradores.map(colab => (
+              <div key={colab.id} className="flex items-center bg-gray-100 border border-gray-200 rounded px-3 py-2 shadow-sm">
+                <span className="font-medium text-gray-700 mr-4">{colab.nome}</span>
+                <button onClick={() => editarColaborador(colab.id, colab.nome)} className="text-slate-500 hover:text-blue-600 font-bold mr-3" title="Editar Nome">✏️</button>
+                <button onClick={() => removerColaborador(colab.id)} className="text-red-500 hover:text-red-700 font-bold text-xl leading-none" title="Remover">&times;</button>
+              </div>
+            ))}
+            {colaboradores.length === 0 && <p className="text-gray-400 italic">Nenhum colaborador registrado.</p>}
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL DE EDIÇÃO DE ROMANEIO ================= */}
+      {romaneioEditando && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
+            <div className="bg-gray-900 px-6 py-4 flex justify-between items-center">
+              <h3 className="text-lg font-bold text-white">Editar Romaneio</h3>
+              <button onClick={() => setRomaneioEditando(null)} className="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
+            </div>
+            
+            <form onSubmit={salvarEdicao} className="p-6 flex-1 overflow-y-auto">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1 uppercase">Item / SKU</label>
+                  <input type="text" value={romaneioEditando.item} onChange={(e) => setRomaneioEditando({...romaneioEditando, item: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-2 text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" required />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1 uppercase">Quantidade</label>
+                  <input type="number" value={romaneioEditando.quantidade} onChange={(e) => setRomaneioEditando({...romaneioEditando, quantidade: e.target.value})} className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-2 text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" required />
+                </div>
+                
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Tempo Estimado</label>
+                  <div className="flex gap-2 items-center">
+                    <div className="flex flex-col">
+                      <input type="number" min="0" value={romaneioEditando.editHoras} onChange={(e) => setRomaneioEditando({...romaneioEditando, editHoras: e.target.value})} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">HORAS</span>
+                    </div>
+                    <span className="font-bold text-gray-400 mb-4">:</span>
+                    <div className="flex flex-col">
+                      <input type="number" min="0" max="59" value={romaneioEditando.editMinutos} onChange={(e) => setRomaneioEditando({...romaneioEditando, editMinutos: e.target.value})} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">MIN</span>
+                    </div>
+                    <span className="font-bold text-gray-400 mb-4">:</span>
+                    <div className="flex flex-col">
+                      <input type="number" min="0" max="59" value={romaneioEditando.editSegundos} onChange={(e) => setRomaneioEditando({...romaneioEditando, editSegundos: e.target.value})} className="w-16 bg-gray-50 border border-gray-300 rounded px-2 py-2 text-center text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" />
+                      <span className="text-[10px] text-gray-400 text-center mt-1 font-bold">SEG</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide mt-2">Equipe Envolvida</label>
+                  <div className="flex flex-wrap gap-2 border border-gray-200 p-3 rounded bg-gray-50">
+                    {colaboradores.map(colab => (
+                      <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${romaneioEditando.equipe?.includes(colab.nome) ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}>
+                        <input type="checkbox" className="hidden" checked={romaneioEditando.equipe?.includes(colab.nome)} onChange={() => toggleColaboradorEdicao(colab.nome)} />
+                        {colab.nome}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="mt-8 flex justify-end gap-3">
+                <button type="button" onClick={() => setRomaneioEditando(null)} className="px-4 py-2 rounded text-gray-600 hover:bg-gray-100 font-bold transition-colors">Cancelar</button>
+                <button type="submit" className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold shadow transition-colors">Salvar Alterações</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
