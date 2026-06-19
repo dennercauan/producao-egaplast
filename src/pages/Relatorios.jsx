@@ -200,6 +200,7 @@ export default function Relatorios() {
   };
 
   return (
+    
     <div className="flex flex-col h-full p-8 bg-gray-100 overflow-hidden">
       <header className="mb-6 flex justify-between items-end border-b border-gray-300 pb-2 shrink-0">
         <div>

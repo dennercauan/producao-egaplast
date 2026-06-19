@@ -146,7 +146,7 @@ export default function Visor() {
               {alerta.tipo === 'FINALIZADO' ? '🏆' : '📦'}
             </div>
             <h1 className={`text-6xl font-black uppercase tracking-widest mb-4 ${alerta.tipo === 'FINALIZADO' ? 'text-emerald-400' : 'text-blue-400'}`}>
-              {alerta.tipo === 'FINALIZADO' ? 'Romaneio Finalizado!' : 'Novo Romaneio!'}
+              {alerta.tipo === 'FINALIZADO' ? 'Demanda Finalizada!' : 'Nova Demanda!'}
             </h1>
             <p className="text-4xl font-bold text-white uppercase max-w-4xl truncate border-t border-slate-700 pt-6">
               {alerta.item}
@@ -196,7 +196,7 @@ export default function Visor() {
           <div className="flex justify-between items-center mb-6 shrink-0 border-b border-slate-100 pb-4">
             <h2 className="text-2xl font-black text-slate-800 uppercase flex items-center gap-3">
               <span className="w-4 h-4 rounded-full bg-blue-500 animate-pulse"></span>
-              Romaneios Ativos
+              Demandas em Andamento
             </h2>
             <span className="text-slate-500 font-bold text-lg uppercase tracking-widest bg-slate-100 px-4 py-1 rounded-full">
               {ativos.length} Em Andamento
