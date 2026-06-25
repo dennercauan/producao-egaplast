@@ -26,8 +26,9 @@ export default function Painel() {
   const [filtroData, setFiltroData] = useState('');
   const [ordenacao, setOrdenacao] = useState('recentes');
 
-  // Estado do Modal de Edição
+  // Estado dos Modais
   const [romaneioEditando, setRomaneioEditando] = useState(null);
+  const [modalFilaAberto, setModalFilaAberto] = useState(false);
 
   // 1. Listeners do Firebase
   useEffect(() => {
@@ -78,13 +79,14 @@ export default function Painel() {
     setColabsSelecionados(prev => prev.includes(nome) ? prev.filter(n => n !== nome) : [...prev, nome]);
   };
 
-  const adicionarDemanda = async (e) => {
-    e.preventDefault();
+  const adicionarDemanda = async (e, programarFila = false) => {
+    if (e) e.preventDefault();
     const h = Number(horasEst) || 0;
     const m = Number(minutosEst) || 0;
     const s = Number(segundosEst) || 0;
 
-    if (!item || !quantidade || colabsSelecionados.length === 0) return alert("Preencha item, quantidade e selecione a equipe.");
+    if (!item || !quantidade) return alert("Preencha o item e a quantidade.");
+    if (!programarFila && colabsSelecionados.length === 0) return alert("Selecione a equipe envolvida para iniciar a demanda agora.");
     if (h === 0 && m === 0 && s === 0) return alert("Insira um tempo estimado maior que zero.");
 
     const tempoFormatadoStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
@@ -97,8 +99,8 @@ export default function Painel() {
         equipe: colabsSelecionados,
         tempoEstimadoStr: tempoFormatadoStr,
         tempoEstimado: tempoCalculadoMin,
-        status: 'Em Andamento',
-        horaInicioStr: Date.now(),
+        status: programarFila ? 'Programado' : 'Em Andamento',
+        horaInicioStr: programarFila ? null : Date.now(),
         tempoPausadoTotalMs: 0,
         historicoPausas: [],
         criadoEm: serverTimestamp()
@@ -116,7 +118,8 @@ export default function Painel() {
     }
   };
 
-  const abrirModalEdicao = (demanda) => {
+  // Alterada para aceitar a flag de Início Automático
+  const abrirModalEdicao = (demanda, iniciarAposSalvar = false) => {
     let h = '', m = '', s = '';
     if (demanda.tempoEstimadoStr) {
       const partes = demanda.tempoEstimadoStr.split(':');
@@ -126,7 +129,8 @@ export default function Painel() {
       ...demanda,
       editHoras: h,
       editMinutos: m,
-      editSegundos: s
+      editSegundos: s,
+      iniciarAposSalvar 
     });
   };
 
@@ -136,7 +140,12 @@ export default function Painel() {
     const m = Number(romaneioEditando.editMinutos) || 0;
     const s = Number(romaneioEditando.editSegundos) || 0;
 
-    if (!romaneioEditando.item || !romaneioEditando.quantidade || romaneioEditando.equipe.length === 0) return alert("Preencha os dados e a equipe.");
+    if (!romaneioEditando.item || !romaneioEditando.quantidade) return alert("Preencha item e quantidade.");
+    
+    // Se a demanda estiver rodando OU for iniciar logo após o clique, exige equipe
+    if ((romaneioEditando.status === 'Em Andamento' || romaneioEditando.iniciarAposSalvar) && (!romaneioEditando.equipe || romaneioEditando.equipe.length === 0)) {
+      return alert("Para iniciar a demanda, é obrigatório selecionar a equipe.");
+    }
     if (h === 0 && m === 0 && s === 0) return alert("O tempo estimado não pode ser zero.");
 
     const tempoFormatadoStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
@@ -148,11 +157,14 @@ export default function Painel() {
         quantidade: Number(romaneioEditando.quantidade),
         tempoEstimadoStr: tempoFormatadoStr,
         tempoEstimado: tempoCalculadoMin,
-        equipe: romaneioEditando.equipe
+        equipe: romaneioEditando.equipe || []
       };
 
-      // REGRA NOVA: Recalcula a produtividade se a demanda já estiver Concluída
-      if (romaneioEditando.status === 'Concluído') {
+      // REGRA: Se a intenção era iniciar direto, atualiza o status junto com os dados
+      if (romaneioEditando.iniciarAposSalvar) {
+        dadosAtualizacao.status = 'Em Andamento';
+        dadosAtualizacao.horaInicioStr = Date.now();
+      } else if (romaneioEditando.status === 'Concluído') {
         const tempoRealMin = (romaneioEditando.tempoAtivoMs || 0) / 60000;
         let produtividadePorcentagem = 100;
         
@@ -169,9 +181,29 @@ export default function Painel() {
 
   const toggleColaboradorEdicao = (nome) => {
     setRomaneioEditando(prev => {
-      const novaEquipe = prev.equipe.includes(nome) ? prev.equipe.filter(n => n !== nome) : [...prev.equipe, nome];
+      const equipeAtual = prev.equipe || [];
+      const novaEquipe = equipeAtual.includes(nome) ? equipeAtual.filter(n => n !== nome) : [...equipeAtual, nome];
       return { ...prev, equipe: novaEquipe };
     });
+  };
+
+  const iniciarDemandaFila = async (demanda) => {
+    // Abre a tela de edição silenciosamente, sem alert, passando a flag de iniciar
+    if (!demanda.equipe || demanda.equipe.length === 0) {
+      setModalFilaAberto(false);
+      abrirModalEdicao(demanda, true);
+      return;
+    }
+
+    try {
+      await updateDoc(doc(db, 'romaneios_ativos', demanda.id), {
+        status: 'Em Andamento',
+        horaInicioStr: Date.now()
+      });
+      if (romaneiosProgramados.length === 1) {
+        setModalFilaAberto(false);
+      }
+    } catch (error) { console.error("Erro ao iniciar da fila:", error); }
   };
 
   const alterarStatusRomaneio = async (demanda, novoStatus) => {
@@ -287,7 +319,9 @@ export default function Painel() {
     });
   };
 
-  const romaneiosAtivos = demandas.filter(d => d.status !== 'Concluído');
+  // Separação das listas
+  const romaneiosProgramados = demandas.filter(d => d.status === 'Programado');
+  const romaneiosEmAndamento = demandas.filter(d => d.status === 'Em Andamento' || d.status === 'Pausado');
   
   let historicoFiltrado = demandas.filter(d => d.status === 'Concluído').filter(d => {
     const matchBusca = d.item.toLowerCase().includes(filtroBusca.toLowerCase());
@@ -326,9 +360,11 @@ export default function Painel() {
 
       {/* ================= ABA: ROMANEIOS ATIVOS ================= */}
       {abaAtiva === 'romaneios' && (
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.3 }}>
-          <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm z-10 mb-4">
-            <form className="flex flex-col gap-4" onSubmit={adicionarDemanda}>
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.3 }} className="flex flex-col gap-6">
+          
+          {/* Formulário */}
+          <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm z-10">
+            <form className="flex flex-col gap-4" onSubmit={(e) => adicionarDemanda(e, false)}>
               <div className="grid grid-cols-1 md:grid-cols-6 gap-4 items-start">
                 <div className="md:col-span-2">
                   <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Item / SKU</label>
@@ -359,15 +395,18 @@ export default function Painel() {
                   </div>
                 </div>
 
-                <div className="flex items-end h-full mt-1 md:mt-0">
-                  <button type="submit" className="w-full h-10 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded shadow-md transition-all uppercase text-sm tracking-wider">
-                    Iniciar
+                <div className="flex flex-col justify-end gap-2 h-full mt-1 md:mt-0">
+                  <button type="submit" className="w-full h-[38px] bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded shadow-md transition-all uppercase text-xs tracking-wider">
+                    Iniciar Agora
+                  </button>
+                  <button type="button" onClick={(e) => adicionarDemanda(e, true)} className="w-full h-[38px] bg-slate-600 hover:bg-slate-700 text-white font-bold rounded shadow-md transition-all uppercase text-xs tracking-wider">
+                    Programar
                   </button>
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Selecionar Equipe Envolvida:</label>
+                <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide">Selecionar Equipe Envolvida <span className="text-gray-400 lowercase font-normal"></span></label>
                 <div className="flex flex-wrap gap-2">
                   {colaboradores.length === 0 ? <span className="text-sm text-red-500 italic">Adicione colaboradores na aba "Colaboradores".</span> : null}
                   {colaboradores.map(colab => (
@@ -381,74 +420,92 @@ export default function Painel() {
             </form>
           </div>
 
-          <div className="flex-1 bg-white border border-gray-200 rounded shadow-sm overflow-hidden flex flex-col">
-            <div className="overflow-y-auto overflow-x-auto flex-1 max-h-[60vh]">
-              <table className="w-full text-left text-sm text-gray-700 min-w-[800px]">
-                <thead className="bg-gray-50 text-gray-600 sticky top-0 border-b border-gray-200 shadow-sm z-10">
-                  <tr>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs">Item / Equipe</th>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Qtd.</th>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Tempo Est.</th>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Cronômetro</th>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Status</th>
-                    <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-right">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  <AnimatePresence>
-                    {romaneiosAtivos.length === 0 ? (
-                      <motion.tr initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
-                        <td colSpan="6" className="px-6 py-12 text-center text-gray-400">Nenhuma demanda ativa.</td>
-                      </motion.tr>
-                    ) : (
-                      romaneiosAtivos.map((demanda) => {
-                        const cronometroMs = getTempoCronometroMs(demanda);
-                        const atrasado = (cronometroMs / 60000) > demanda.tempoEstimado;
+          {/* Em Andamento */}
+          <div>
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-3 gap-3">
+              <h3 className="text-sm font-bold text-blue-600 uppercase tracking-widest flex items-center gap-2">
+                ⚙️ Produção em Andamento ({romaneiosEmAndamento.length})
+              </h3>
+              {/* Botão de abrir o Modal da Fila de Stand-by */}
+              {romaneiosProgramados.length > 0 && (
+                <button 
+                  onClick={() => setModalFilaAberto(true)}
+                  className="bg-purple-100 hover:bg-purple-200 text-purple-700 font-bold px-4 py-2 rounded shadow-sm text-xs uppercase tracking-wider transition-colors border border-purple-200"
+                >
+                  ⏳ Fila de Espera ({romaneiosProgramados.length})
+                </button>
+              )}
+            </div>
 
-                        return (
-                          <motion.tr 
-                            key={demanda.id} 
-                            initial={{ opacity: 0, x: -20 }} 
-                            animate={{ opacity: 1, x: 0 }} 
-                            exit={{ opacity: 0, scale: 0.95 }} 
-                            layout 
-                            transition={{ duration: 0.3 }}
-                            className="hover:bg-blue-50/30 transition-colors"
-                          >
-                            <td className="px-6 py-3">
-                              <p className="font-semibold text-gray-900">{demanda.item}</p>
-                              <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
-                            </td>
-                            <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
-                            <td className="px-6 py-3 text-center font-bold text-gray-600">{demanda.tempoEstimadoStr}</td>
-                            <td className="px-6 py-3 text-center font-mono font-bold text-lg">
-                              <span className={atrasado && demanda.status === 'Em Andamento' ? 'text-red-500' : 'text-blue-600'}>
-                                {formatarTempoMs(cronometroMs)}
-                              </span>
-                            </td>
-                            <td className="px-6 py-3 text-center">
-                              <span className={`px-3 py-1 text-xs font-bold rounded-full border ${demanda.status === 'Pausado' ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'}`}>
-                                {demanda.status === 'Pausado' && demanda.motivoPausa ? `Pausa: ${demanda.motivoPausa}` : demanda.status}
-                              </span>
-                            </td>
-                            <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
-                              <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-100 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
-                              <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
-                              
-                              {demanda.status === 'Em Andamento' ? (
-                                <button onClick={() => alterarStatusRomaneio(demanda, 'Pausado')} className="text-amber-600 hover:bg-amber-50 px-3 py-1.5 rounded border border-amber-200 text-xs font-bold uppercase transition-colors">Pausar</button>
-                              ) : (
-                                <button onClick={() => alterarStatusRomaneio(demanda, 'Em Andamento')} className="text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors">Retomar</button>
-                              )}
-                              <button onClick={() => alterarStatusRomaneio(demanda, 'Concluído')} className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded text-xs font-bold uppercase shadow-sm transition-colors">Concluir</button>
-                            </td>
-                          </motion.tr>
-                        );
-                      })
-                    )}
-                  </AnimatePresence>
-                </tbody>
-              </table>
+            <div className="bg-white border border-gray-200 rounded shadow-sm overflow-hidden flex flex-col">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm text-gray-700 min-w-[800px]">
+                  <thead className="bg-blue-50/50 text-gray-600 border-b border-gray-200">
+                    <tr>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs">Item / Equipe</th>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Qtd.</th>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Tempo Est.</th>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Cronômetro</th>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Status</th>
+                      <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    <AnimatePresence>
+                      {romaneiosEmAndamento.length === 0 ? (
+                        <motion.tr initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}>
+                          <td colSpan="6" className="px-6 py-12 text-center text-gray-400">Nenhuma demanda ativa no momento.</td>
+                        </motion.tr>
+                      ) : (
+                        romaneiosEmAndamento.map((demanda) => {
+                          const cronometroMs = getTempoCronometroMs(demanda);
+                          const atrasado = (cronometroMs / 60000) > demanda.tempoEstimado;
+
+                          return (
+                            <motion.tr 
+                              key={demanda.id} 
+                              initial={{ opacity: 0, x: -20 }} 
+                              animate={{ opacity: 1, x: 0 }} 
+                              exit={{ opacity: 0, scale: 0.95 }} 
+                              layout 
+                              transition={{ duration: 0.3 }}
+                              className="hover:bg-blue-50/30 transition-colors"
+                            >
+                              <td className="px-6 py-3">
+                                <p className="font-semibold text-gray-900">{demanda.item}</p>
+                                <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
+                              </td>
+                              <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
+                              <td className="px-6 py-3 text-center font-bold text-gray-600">{demanda.tempoEstimadoStr}</td>
+                              <td className="px-6 py-3 text-center font-mono font-bold text-lg">
+                                <span className={atrasado && demanda.status === 'Em Andamento' ? 'text-red-500' : 'text-blue-600'}>
+                                  {formatarTempoMs(cronometroMs)}
+                                </span>
+                              </td>
+                              <td className="px-6 py-3 text-center">
+                                <span className={`px-3 py-1 text-xs font-bold rounded-full border ${demanda.status === 'Pausado' ? 'bg-amber-100 text-amber-800 border-amber-200' : 'bg-emerald-100 text-emerald-800 border-emerald-200'}`}>
+                                  {demanda.status === 'Pausado' && demanda.motivoPausa ? `Pausa: ${demanda.motivoPausa}` : demanda.status}
+                                </span>
+                              </td>
+                              <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
+                                <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-100 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
+                                <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
+                                
+                                {demanda.status === 'Em Andamento' ? (
+                                  <button onClick={() => alterarStatusRomaneio(demanda, 'Pausado')} className="text-amber-600 hover:bg-amber-50 px-3 py-1.5 rounded border border-amber-200 text-xs font-bold uppercase transition-colors">Pausar</button>
+                                ) : (
+                                  <button onClick={() => alterarStatusRomaneio(demanda, 'Em Andamento')} className="text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors">Retomar</button>
+                                )}
+                                <button onClick={() => alterarStatusRomaneio(demanda, 'Concluído')} className="bg-emerald-500 hover:bg-emerald-600 text-white px-3 py-1.5 rounded text-xs font-bold uppercase shadow-sm transition-colors">Concluir</button>
+                              </td>
+                            </motion.tr>
+                          );
+                        })
+                      )}
+                    </AnimatePresence>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </motion.div>
@@ -460,7 +517,7 @@ export default function Painel() {
           <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-bold text-gray-500 mb-1">Buscar por Item</label>
-              <input type="text" value={filtroBusca} onChange={(e) => setFiltroBusca(e.target.value)} placeholder="Ex: Kit" className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+              <input type="text" value={filtroBusca} onChange={(e) => setFiltroBusca(e.target.value)} placeholder="Ex: Tubo" className="w-full bg-gray-50 border border-gray-300 rounded px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
             </div>
             <div>
               <label className="block text-xs font-bold text-gray-500 mb-1">Colaborador</label>
@@ -575,7 +632,81 @@ export default function Painel() {
         </motion.div>
       )}
 
-      {/* ================= MODAL DE EDIÇÃO DE ROMANEIO ================= */}
+      {/* ================= MODAL DA FILA DE STAND-BY ================= */}
+      <AnimatePresence>
+        {modalFilaAberto && (
+          <motion.div 
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }} 
+            className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }} 
+              animate={{ scale: 1, y: 0 }} 
+              exit={{ scale: 0.9, y: 20 }} 
+              className="bg-white rounded-lg shadow-2xl w-full max-w-5xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="bg-slate-800 px-6 py-4 flex justify-between items-center shrink-0">
+                <h3 className="text-lg font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                  ⏳ Fila de Espera
+                </h3>
+                <button onClick={() => setModalFilaAberto(false)} className="text-slate-400 hover:text-white text-3xl leading-none">&times;</button>
+              </div>
+              
+              <div className="p-6 flex-1 overflow-y-auto bg-slate-50">
+                {romaneiosProgramados.length === 0 ? (
+                  <p className="text-center text-slate-500 py-10 font-medium">Não há nenhuma demanda aguardando na fila no momento.</p>
+                ) : (
+                  <div className="bg-white border border-slate-200 rounded shadow-sm overflow-hidden">
+                    <table className="w-full text-left text-sm text-slate-700 min-w-[800px]">
+                      <thead className="bg-slate-100 text-slate-600 border-b border-slate-200">
+                        <tr>
+                          <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs">Item / Equipe</th>
+                          <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Qtd.</th>
+                          <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Tempo Est.</th>
+                          <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-center">Status</th>
+                          <th className="px-6 py-3 font-bold uppercase tracking-wider text-xs text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {romaneiosProgramados.map((demanda) => (
+                          <tr key={demanda.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="px-6 py-4">
+                              <p className="font-semibold text-slate-900">{demanda.item}</p>
+                              <p className="text-xs mt-1">
+                                {demanda.equipe && demanda.equipe.length > 0 ? (
+                                  <span className="text-slate-500">{demanda.equipe.join(', ')}</span>
+                                ) : (
+                                  <span className="text-red-400 italic font-medium">Equipe pendente (Obrigatório para iniciar)</span>
+                                )}
+                              </p>
+                            </td>
+                            <td className="px-6 py-4 text-center font-semibold text-slate-700">{demanda.quantidade}</td>
+                            <td className="px-6 py-4 text-center font-bold text-slate-600">{demanda.tempoEstimadoStr}</td>
+                            <td className="px-6 py-4 text-center">
+                              <span className="px-3 py-1 text-xs font-bold rounded-full border bg-purple-100 text-purple-800 border-purple-200">
+                                Na Fila
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 text-right space-x-1.5 flex justify-end items-center">
+                              <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-200 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
+                              <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
+                              <button onClick={() => iniciarDemandaFila(demanda)} className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded text-xs font-bold uppercase shadow-sm transition-colors">▶ Iniciar Agora</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= MODAL DE EDIÇÃO DE ROMANEIO E AUTO-INÍCIO ================= */}
       <AnimatePresence>
         {romaneioEditando && (
           <motion.div 
@@ -591,7 +722,9 @@ export default function Painel() {
               className="bg-white rounded-lg shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]"
             >
               <div className="bg-gray-900 px-6 py-4 flex justify-between items-center shrink-0">
-                <h3 className="text-lg font-bold text-white">Editar Romaneio</h3>
+                <h3 className="text-lg font-bold text-white">
+                  {romaneioEditando.iniciarAposSalvar ? 'Definir Equipe para Iniciar' : 'Editar Romaneio'}
+                </h3>
                 <button onClick={() => setRomaneioEditando(null)} className="text-gray-400 hover:text-white text-2xl leading-none">&times;</button>
               </div>
               
@@ -627,11 +760,14 @@ export default function Painel() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide mt-2">Equipe Envolvida</label>
+                    <label className="block text-xs font-bold text-gray-600 mb-2 uppercase tracking-wide mt-2">
+                      Equipe Envolvida 
+                      {(romaneioEditando.status === 'Em Andamento' || romaneioEditando.iniciarAposSalvar) && <span className="text-red-500 ml-1">(Obrigatório)</span>}
+                    </label>
                     <div className="flex flex-wrap gap-2 border border-gray-200 p-3 rounded bg-gray-50">
                       {colaboradores.map(colab => (
-                        <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${romaneioEditando.equipe?.includes(colab.nome) ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}>
-                          <input type="checkbox" className="hidden" checked={romaneioEditando.equipe?.includes(colab.nome)} onChange={() => toggleColaboradorEdicao(colab.nome)} />
+                        <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${(romaneioEditando.equipe || []).includes(colab.nome) ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}>
+                          <input type="checkbox" className="hidden" checked={(romaneioEditando.equipe || []).includes(colab.nome)} onChange={() => toggleColaboradorEdicao(colab.nome)} />
                           {colab.nome}
                         </label>
                       ))}
@@ -640,7 +776,9 @@ export default function Painel() {
                 </div>
                 <div className="mt-8 flex justify-end gap-3">
                   <button type="button" onClick={() => setRomaneioEditando(null)} className="px-4 py-2 rounded text-gray-600 hover:bg-gray-100 font-bold transition-colors">Cancelar</button>
-                  <button type="submit" className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold shadow transition-colors">Salvar Alterações</button>
+                  <button type="submit" className="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-bold shadow transition-colors">
+                    {romaneioEditando.iniciarAposSalvar ? 'Salvar e Iniciar Agora' : 'Salvar Alterações'}
+                  </button>
                 </div>
               </form>
             </motion.div>
