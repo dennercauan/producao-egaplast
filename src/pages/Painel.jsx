@@ -20,10 +20,13 @@ export default function Painel() {
   const [colabsSelecionados, setColabsSelecionados] = useState([]);
   const [novoColaborador, setNovoColaborador] = useState('');
 
-  // Estados dos Filtros do Histórico
+// Estados dos Filtros do Histórico
   const [filtroBusca, setFiltroBusca] = useState('');
   const [filtroColab, setFiltroColab] = useState('');
-  const [filtroData, setFiltroData] = useState('');
+  const [filtroData, setFiltroData] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
   const [ordenacao, setOrdenacao] = useState('recentes');
 
   // Estado dos Modais

@@ -26,7 +26,7 @@ export default function Visor() {
       const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDemandas(docs);
 
-      const atuaisAtivos = docs.filter(d => d.status !== 'Concluído');
+      const atuaisAtivos = docs.filter(d => d.status === 'Em Andamento' || d.status === 'Pausado');
       const atuaisConcluidos = docs.filter(d => d.status === 'Concluído' && isHoje(d.finalizadoEm));
 
       if (!isInitialLoad.current) {
@@ -91,7 +91,7 @@ export default function Visor() {
     return data.getDate() === hoje.getDate() && data.getMonth() === hoje.getMonth() && data.getFullYear() === hoje.getFullYear();
   };
 
-  const ativos = demandas.filter(d => d.status !== 'Concluído');
+  const ativos = demandas.filter(d => d.status === 'Em Andamento' || d.status === 'Pausado');
   const concluidosHoje = demandas.filter(d => d.status === 'Concluído' && isHoje(d.finalizadoEm));
   const totalPecasHoje = concluidosHoje.reduce((acc, d) => acc + (d.quantidade || 0), 0);
 
