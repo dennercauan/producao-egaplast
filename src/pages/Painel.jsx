@@ -20,7 +20,7 @@ export default function Painel() {
   const [colabsSelecionados, setColabsSelecionados] = useState([]);
   const [novoColaborador, setNovoColaborador] = useState('');
 
-// Estados dos Filtros do Histórico
+  // Estados dos Filtros do Histórico
   const [filtroBusca, setFiltroBusca] = useState('');
   const [filtroColab, setFiltroColab] = useState('');
   const [filtroData, setFiltroData] = useState(() => {
@@ -32,6 +32,8 @@ export default function Painel() {
   // Estado dos Modais
   const [romaneioEditando, setRomaneioEditando] = useState(null);
   const [modalFilaAberto, setModalFilaAberto] = useState(false);
+  const [romaneioDetalhes, setRomaneioDetalhes] = useState(null);
+  const [textoObservacao, setTextoObservacao] = useState('');
 
   // 1. Listeners do Firebase
   useEffect(() => {
@@ -99,7 +101,10 @@ export default function Painel() {
       await addDoc(collection(db, 'romaneios_ativos'), {
         item,
         quantidade: Number(quantidade),
-        equipe: colabsSelecionados,
+        equipe: colabsSelecionados.map(nome => ({
+          nome,
+          entradaMs: programarFila ? null : Date.now()
+        })),
         tempoEstimadoStr: tempoFormatadoStr,
         tempoEstimado: tempoCalculadoMin,
         status: programarFila ? 'Programado' : 'Em Andamento',
@@ -121,7 +126,6 @@ export default function Painel() {
     }
   };
 
-  // Alterada para aceitar a flag de Início Automático
   const abrirModalEdicao = (demanda, iniciarAposSalvar = false) => {
     let h = '', m = '', s = '';
     if (demanda.tempoEstimadoStr) {
@@ -145,7 +149,6 @@ export default function Painel() {
 
     if (!romaneioEditando.item || !romaneioEditando.quantidade) return alert("Preencha item e quantidade.");
     
-    // Se a demanda estiver rodando OU for iniciar logo após o clique, exige equipe
     if ((romaneioEditando.status === 'Em Andamento' || romaneioEditando.iniciarAposSalvar) && (!romaneioEditando.equipe || romaneioEditando.equipe.length === 0)) {
       return alert("Para iniciar a demanda, é obrigatório selecionar a equipe.");
     }
@@ -163,7 +166,6 @@ export default function Painel() {
         equipe: romaneioEditando.equipe || []
       };
 
-      // REGRA: Se a intenção era iniciar direto, atualiza o status junto com os dados
       if (romaneioEditando.iniciarAposSalvar) {
         dadosAtualizacao.status = 'Em Andamento';
         dadosAtualizacao.horaInicioStr = Date.now();
@@ -185,13 +187,20 @@ export default function Painel() {
   const toggleColaboradorEdicao = (nome) => {
     setRomaneioEditando(prev => {
       const equipeAtual = prev.equipe || [];
-      const novaEquipe = equipeAtual.includes(nome) ? equipeAtual.filter(n => n !== nome) : [...equipeAtual, nome];
-      return { ...prev, equipe: novaEquipe };
+      const index = equipeAtual.findIndex(c => (typeof c === 'string' ? c === nome : c.nome === nome));
+
+      if (index !== -1) {
+        const novaEquipe = [...equipeAtual];
+        novaEquipe.splice(index, 1);
+        return { ...prev, equipe: novaEquipe };
+      } else {
+        const entradaMs = (prev.status === 'Em Andamento' || prev.iniciarAposSalvar) ? Date.now() : null;
+        return { ...prev, equipe: [...equipeAtual, { nome, entradaMs }] };
+      }
     });
   };
 
   const iniciarDemandaFila = async (demanda) => {
-    // Abre a tela de edição silenciosamente, sem alert, passando a flag de iniciar
     if (!demanda.equipe || demanda.equipe.length === 0) {
       setModalFilaAberto(false);
       abrirModalEdicao(demanda, true);
@@ -322,13 +331,90 @@ export default function Painel() {
     });
   };
 
-  // Separação das listas
+  const salvarObservacao = async () => {
+    if (!romaneioDetalhes) return;
+    try {
+      await updateDoc(doc(db, 'romaneios_ativos', romaneioDetalhes.id), {
+        observacoes: textoObservacao
+      });
+      setRomaneioDetalhes(prev => ({ ...prev, observacoes: textoObservacao }));
+      alert("Observações salvas com sucesso!");
+    } catch (error) {
+      console.error("Erro ao salvar observação:", error);
+      alert("Erro ao salvar observação.");
+    }
+  };
+
+  const calcularDetalhesEquipe = (d) => {
+    if (!d || !d.equipe || d.equipe.length === 0) return [];
+    
+    const tempoEstMin = d.tempoEstimado || 0;
+    
+    let tempoTotalDecorridoMs = d.tempoTotalDecorridoMs;
+    let tempoAtivoMs = d.tempoAtivoMs;
+    
+    if (d.status !== 'Concluído') {
+      if (!d.horaInicioStr) return [];
+      let ms = agora - d.horaInicioStr - (d.tempoPausadoTotalMs || 0);
+      if (d.status === 'Pausado' && d.inicioUltimaPausa) {
+        ms -= (agora - d.inicioUltimaPausa);
+      }
+      tempoAtivoMs = ms > 0 ? ms : 0;
+      tempoTotalDecorridoMs = agora - d.horaInicioStr;
+    }
+
+    const tempoRealMin = tempoAtivoMs / 60000;
+    let eficiencia = 1;
+    if (tempoRealMin > 0) eficiencia = tempoEstMin / tempoRealMin;
+    if (eficiencia > 3) eficiencia = 3;
+
+    const pontosTotais = tempoEstMin * eficiencia;
+
+    let somaTempoTrabalhadoMs = 0;
+    const temposIndividuais = [];
+
+    d.equipe.forEach(colab => {
+      let nome = typeof colab === 'string' ? colab : colab.nome;
+      let tempoTrabalhadoMs = tempoAtivoMs || 0;
+
+      if (typeof colab === 'object' && colab.entradaMs) {
+        const fimMs = d.status === 'Concluído' 
+          ? (d.finalizadoEm?.toMillis ? d.finalizadoEm.toMillis() : new Date(d.finalizadoEm).getTime()) 
+          : agora;
+        let decorrido = fimMs - colab.entradaMs;
+        
+        if (decorrido > tempoTotalDecorridoMs) decorrido = tempoTotalDecorridoMs;
+        if (decorrido < 0) decorrido = 0;
+
+        const taxaAtiva = (tempoTotalDecorridoMs > 0) ? (tempoAtivoMs / tempoTotalDecorridoMs) : 1;
+        tempoTrabalhadoMs = decorrido * taxaAtiva;
+      }
+
+      somaTempoTrabalhadoMs += tempoTrabalhadoMs;
+      temposIndividuais.push({ nome, tempoTrabalhadoMs });
+    });
+
+    return temposIndividuais.map(ind => {
+      let pontosGanhos = 0;
+      if (somaTempoTrabalhadoMs > 0) {
+        pontosGanhos = pontosTotais * (ind.tempoTrabalhadoMs / somaTempoTrabalhadoMs);
+      } else {
+        pontosGanhos = pontosTotais / d.equipe.length;
+      }
+      return {
+        nome: ind.nome,
+        tempoMs: ind.tempoTrabalhadoMs,
+        pontos: pontosGanhos
+      };
+    });
+  };
+
   const romaneiosProgramados = demandas.filter(d => d.status === 'Programado');
   const romaneiosEmAndamento = demandas.filter(d => d.status === 'Em Andamento' || d.status === 'Pausado');
   
   let historicoFiltrado = demandas.filter(d => d.status === 'Concluído').filter(d => {
     const matchBusca = d.item.toLowerCase().includes(filtroBusca.toLowerCase());
-    const matchColab = filtroColab === '' || (d.equipe && d.equipe.some(c => c.toLowerCase().includes(filtroColab.toLowerCase())));
+    const matchColab = filtroColab === '' || (d.equipe && d.equipe.some(c => (typeof c === 'string' ? c : c.nome).toLowerCase().includes(filtroColab.toLowerCase())));
     const matchData = filtroData === '' || dataParaStringYMD(d.finalizadoEm) === filtroData;
     return matchBusca && matchColab && matchData;
   });
@@ -429,7 +515,6 @@ export default function Painel() {
               <h3 className="text-sm font-bold text-blue-600 uppercase tracking-widest flex items-center gap-2">
                 ⚙️ Produção em Andamento ({romaneiosEmAndamento.length})
               </h3>
-              {/* Botão de abrir o Modal da Fila de Stand-by */}
               {romaneiosProgramados.length > 0 && (
                 <button 
                   onClick={() => setModalFilaAberto(true)}
@@ -476,7 +561,7 @@ export default function Painel() {
                             >
                               <td className="px-6 py-3">
                                 <p className="font-semibold text-gray-900">{demanda.item}</p>
-                                <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
+                                <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.map(c => typeof c === 'string' ? c : c.nome).join(', ')}</p>
                               </td>
                               <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
                               <td className="px-6 py-3 text-center font-bold text-gray-600">{demanda.tempoEstimadoStr}</td>
@@ -493,7 +578,7 @@ export default function Painel() {
                               <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
                                 <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-100 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
                                 <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
-                                
+                                <button onClick={() => { setRomaneioDetalhes(demanda); setTextoObservacao(demanda.observacoes || ''); }} className="text-blue-600 hover:bg-blue-50 px-2 py-1.5 rounded border border-blue-300 text-xs font-bold uppercase transition-colors" title="Ver Detalhes e Observações">👁️</button>
                                 {demanda.status === 'Em Andamento' ? (
                                   <button onClick={() => alterarStatusRomaneio(demanda, 'Pausado')} className="text-amber-600 hover:bg-amber-50 px-3 py-1.5 rounded border border-amber-200 text-xs font-bold uppercase transition-colors">Pausar</button>
                                 ) : (
@@ -579,7 +664,7 @@ export default function Painel() {
                           >
                             <td className="px-6 py-3">
                               <p className="font-semibold text-gray-900">{demanda.item}</p>
-                              <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.join(', ')}</p>
+                              <p className="text-xs text-gray-500 mt-1">{demanda.equipe?.map(c => typeof c === 'string' ? c : c.nome).join(', ')}</p>
                             </td>
                             <td className="px-6 py-3 text-center font-semibold text-gray-700">{demanda.quantidade}</td>
                             <td className="px-6 py-3 text-center font-bold text-gray-500">{demanda.tempoEstimadoStr}</td>
@@ -596,6 +681,7 @@ export default function Painel() {
 
                             <td className="px-6 py-3 text-right space-x-1.5 flex justify-end items-center">
                               <button onClick={() => retomarRomaneioConcluido(demanda)} className="text-blue-600 hover:bg-blue-50 px-2.5 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors">Retomar</button>
+                              <button onClick={() => { setRomaneioDetalhes(demanda); setTextoObservacao(demanda.observacoes || ''); }} className="text-blue-600 hover:bg-blue-50 px-2.5 py-1.5 rounded border border-blue-200 text-xs font-bold uppercase transition-colors" title="Ver Detalhes e Observações">👁️</button>
                               <button onClick={() => abrirModalEdicao(demanda)} className="text-slate-600 hover:bg-slate-200 px-2 py-1.5 rounded border border-slate-300 text-xs font-bold uppercase transition-colors" title="Editar">✏️</button>
                               <button onClick={() => excluirRomaneio(demanda.id)} className="text-red-600 hover:bg-red-50 px-2 py-1.5 rounded border border-red-200 text-xs font-bold uppercase transition-colors" title="Excluir">🗑️</button>
                             </td>
@@ -679,7 +765,7 @@ export default function Painel() {
                               <p className="font-semibold text-slate-900">{demanda.item}</p>
                               <p className="text-xs mt-1">
                                 {demanda.equipe && demanda.equipe.length > 0 ? (
-                                  <span className="text-slate-500">{demanda.equipe.join(', ')}</span>
+                                  <span className="text-slate-500">{demanda.equipe.map(c => typeof c === 'string' ? c : c.nome).join(', ')}</span>
                                 ) : (
                                   <span className="text-red-400 italic font-medium">Equipe pendente (Obrigatório para iniciar)</span>
                                 )}
@@ -768,12 +854,15 @@ export default function Painel() {
                       {(romaneioEditando.status === 'Em Andamento' || romaneioEditando.iniciarAposSalvar) && <span className="text-red-500 ml-1">(Obrigatório)</span>}
                     </label>
                     <div className="flex flex-wrap gap-2 border border-gray-200 p-3 rounded bg-gray-50">
-                      {colaboradores.map(colab => (
-                        <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${(romaneioEditando.equipe || []).includes(colab.nome) ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}>
-                          <input type="checkbox" className="hidden" checked={(romaneioEditando.equipe || []).includes(colab.nome)} onChange={() => toggleColaboradorEdicao(colab.nome)} />
-                          {colab.nome}
-                        </label>
-                      ))}
+                      {colaboradores.map(colab => {
+                        const isSelecionado = (romaneioEditando.equipe || []).some(c => (typeof c === 'string' ? c : c.nome) === colab.nome);
+                        return (
+                          <label key={colab.id} className={`cursor-pointer px-3 py-1 rounded-full text-sm font-medium border transition-colors ${isSelecionado ? 'bg-blue-100 border-blue-500 text-blue-700' : 'bg-white border-gray-300 text-gray-600'}`}>
+                            <input type="checkbox" className="hidden" checked={isSelecionado} onChange={() => toggleColaboradorEdicao(colab.nome)} />
+                            {colab.nome}
+                          </label>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -784,6 +873,115 @@ export default function Painel() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= MODAL DE DETALHES COMPLETO (PRODUTIVIDADE E OBSERVAÇÕES) ================= */}
+      <AnimatePresence>
+        {romaneioDetalhes && (
+          <motion.div 
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }} 
+            className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }} 
+              animate={{ scale: 1, y: 0 }} 
+              exit={{ scale: 0.9, y: 20 }} 
+              className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Header */}
+              <div className="bg-slate-900 px-6 py-4 flex justify-between items-center shrink-0">
+                <div>
+                  <span className="text-[10px] bg-blue-500 text-white font-black px-2 py-0.5 rounded uppercase tracking-wider">
+                    {romaneioDetalhes.status}
+                  </span>
+                  <h3 className="text-xl font-black text-white uppercase tracking-tight mt-1">
+                    {romaneioDetalhes.item}
+                  </h3>
+                </div>
+                <button onClick={() => setRomaneioDetalhes(null)} className="text-gray-400 hover:text-white text-3xl leading-none">&times;</button>
+              </div>
+
+              {/* Corpo do Modal */}
+              <div className="p-6 flex-1 overflow-y-auto space-y-6 bg-slate-50">
+                
+                {/* Informações Gerais */}
+                <div className="grid grid-cols-3 gap-4 bg-white border border-slate-200 p-4 rounded-lg shadow-sm text-center">
+                  <div>
+                    <span className="block text-[11px] font-bold text-slate-400 uppercase">Qtd Total</span>
+                    <span className="text-xl font-black text-slate-800">{romaneioDetalhes.quantidade} un</span>
+                  </div>
+                  <div>
+                    <span className="block text-[11px] font-bold text-slate-400 uppercase">Meta Definida</span>
+                    <span className="text-xl font-black text-slate-800">{romaneioDetalhes.tempoEstimadoStr}</span>
+                  </div>
+                  <div>
+                    <span className="block text-[11px] font-bold text-slate-400 uppercase">Produtividade</span>
+                    <span className={`text-xl font-black ${romaneioDetalhes.produtividadePorcentagem >= 100 || romaneioDetalhes.produtividadePorcentagem === undefined ? 'text-emerald-600' : 'text-red-500'}`}>
+                      {romaneioDetalhes.produtividadePorcentagem !== undefined ? `${romaneioDetalhes.produtividadePorcentagem}%` : 'Calculando...'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Distribuição Proporcional da Equipe */}
+                <div>
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                    📊 Divisão de Pontuação (Proporcional)
+                  </h4>
+                  <div className="bg-white border border-slate-200 rounded-lg shadow-sm divide-y divide-slate-100">
+                    {calcularDetalhesEquipe(romaneioDetalhes).map(colab => (
+                      <div key={colab.nome} className="flex justify-between items-center p-3 text-sm">
+                        <div>
+                          <span className="font-black text-slate-800 uppercase">{colab.nome}</span>
+                          <span className="block text-[11px] text-slate-400 font-medium">
+                            Tempo Alocado: <span className="font-mono text-slate-600 font-bold">{formatarTempoMs(colab.tempoMs)}</span>
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-base font-black text-blue-600 font-mono">+{Math.round(colab.pontos)}</span>
+                          <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest">PONTOS</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Campo de Auditoria/Observações para Diretores */}
+                <div className="flex flex-col">
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    📝 Observações de Produção / Contratempos
+                  </label>
+                  <textarea
+                    value={textoObservacao}
+                    onChange={(e) => setTextoObservacao(e.target.value)}
+                    placeholder=""
+                    className="w-full min-h-[100px] border border-slate-300 rounded-lg p-3 text-sm text-slate-800 bg-white focus:ring-2 focus:ring-blue-500 outline-none resize-none shadow-inner"
+                  />
+                  <button
+                    type="button"
+                    onClick={salvarObservacao}
+                    className="mt-2 self-end bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs uppercase tracking-wider px-4 py-2 rounded shadow transition-colors"
+                  >
+                    Salvar Observações
+                  </button>
+                </div>
+
+              </div>
+
+              {/* Footer */}
+              <div className="bg-slate-100 px-6 py-3 border-t border-slate-200 flex justify-end shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setRomaneioDetalhes(null)}
+                  className="bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold px-4 py-2 rounded-lg text-sm shadow-sm transition-colors"
+                >
+                  Fechar Janela
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}

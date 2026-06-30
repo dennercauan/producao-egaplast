@@ -97,25 +97,64 @@ export default function Visor() {
 
   const calcularRanking = () => {
     const pontuacoes = {};
+
     concluidosHoje.forEach(d => {
       if (!d.equipe || d.equipe.length === 0) return;
+
       const tempoEstMin = d.tempoEstimado || 0;
       const tempoRealMin = (d.tempoAtivoMs || (tempoEstMin * 60000)) / 60000;
+      
       let eficiencia = 1;
       if (tempoRealMin > 0) eficiencia = tempoEstMin / tempoRealMin;
       if (eficiencia > 3) eficiencia = 3; 
 
-      const pontosGerados = (tempoEstMin / d.equipe.length) * eficiencia;
+      // Pontos totais gerados pela demanda ("A Pizza")
+      const pontosTotais = tempoEstMin * eficiencia;
 
+      let somaTempoTrabalhadoMs = 0;
+      const temposIndividuais = [];
+
+      // 1. Mapeia o esforço de cada um e soma o total
       d.equipe.forEach(colab => {
-        if (!pontuacoes[colab]) pontuacoes[colab] = { nome: colab, pontos: 0, entregas: 0 };
-        pontuacoes[colab].pontos += pontosGerados;
-        pontuacoes[colab].entregas += 1;
+        let nome = typeof colab === 'string' ? colab : colab.nome;
+        let tempoTrabalhadoMs = d.tempoAtivoMs || 0; // Padrão para dados antigos
+
+        if (typeof colab === 'object' && colab.entradaMs) {
+          const fimMs = d.finalizadoEm ? (d.finalizadoEm.toDate ? d.finalizadoEm.toDate().getTime() : new Date(d.finalizadoEm).getTime()) : Date.now();
+          let decorrido = fimMs - colab.entradaMs;
+          
+          if (decorrido > d.tempoTotalDecorridoMs) decorrido = d.tempoTotalDecorridoMs;
+          if (decorrido < 0) decorrido = 0;
+
+          // Desconta as pausas globais para achar o tempo ativo líquido da pessoa
+          const taxaAtiva = (d.tempoTotalDecorridoMs > 0) ? (d.tempoAtivoMs / d.tempoTotalDecorridoMs) : 1;
+          tempoTrabalhadoMs = decorrido * taxaAtiva;
+        }
+
+        somaTempoTrabalhadoMs += tempoTrabalhadoMs;
+        temposIndividuais.push({ nome, tempoTrabalhadoMs });
+      });
+
+      // 2. Distribui os pontos baseado na fatia de esforço
+      temposIndividuais.forEach(ind => {
+        if (!pontuacoes[ind.nome]) pontuacoes[ind.nome] = { nome: ind.nome, pontos: 0, entregas: 0 };
+        
+        let pontosGanhos = 0;
+        if (somaTempoTrabalhadoMs > 0) {
+          const fatia = ind.tempoTrabalhadoMs / somaTempoTrabalhadoMs;
+          pontosGanhos = pontosTotais * fatia;
+        } else {
+          // Fallback de segurança 
+          pontosGanhos = pontosTotais / d.equipe.length;
+        }
+
+        pontuacoes[ind.nome].pontos += pontosGanhos;
+        pontuacoes[ind.nome].entregas += 1;
       });
     });
+
     return Object.values(pontuacoes).sort((a, b) => b.pontos - a.pontos).slice(0, 5);
   };
-
   const ranking = calcularRanking();
   const ultimosConcluidos = concluidosHoje.slice(0, 4);
 
@@ -250,7 +289,7 @@ export default function Visor() {
                           </p>
                         </div>
                         <p className={`${sizeClass.text} font-bold text-slate-500 truncate mt-1 opacity-90`}>
-                          👥 {demanda.equipe?.join(' • ')}
+                          👥 {demanda.equipe?.map(c => typeof c === 'string' ? c : c.nome).join(' • ')}
                         </p>
                       </div>
 
@@ -352,7 +391,7 @@ export default function Visor() {
                         <div key={demanda.id} className="bg-slate-50 border border-slate-200 rounded-lg p-3 flex flex-col justify-between shadow-sm">
                           <div className="min-w-0">
                             <h3 className="text-sm font-black text-slate-800 uppercase truncate mb-1">{demanda.item}</h3>
-                            <p className="text-[11px] font-bold text-slate-500 truncate mb-1">👥 {demanda.equipe?.join(', ')}</p>
+                            <p className="text-[11px] font-bold text-slate-500 truncate mb-1">👥 {demanda.equipe?.map(c => typeof c === 'string' ? c : c.nome).join(' • ')}</p>
                           </div>
                           
                           <div className="grid grid-cols-2 gap-1.5 mt-2 pt-2 border-t border-slate-200/60 text-[11px]">
