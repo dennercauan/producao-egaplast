@@ -103,7 +103,10 @@ export default function Painel() {
         quantidade: Number(quantidade),
         equipe: colabsSelecionados.map(nome => ({
           nome,
-          entradaMs: programarFila ? null : Date.now()
+          entradaMs: programarFila ? null : Date.now(),
+          status: 'Ativo', // Novo
+          tempoPausadoMs: 0, // Novo
+          inicioPausaMs: null // Novo
         })),
         tempoEstimadoStr: tempoFormatadoStr,
         tempoEstimado: tempoCalculadoMin,
@@ -194,8 +197,9 @@ export default function Painel() {
         novaEquipe.splice(index, 1);
         return { ...prev, equipe: novaEquipe };
       } else {
+        // Adicionar novo colaborador
         const entradaMs = (prev.status === 'Em Andamento' || prev.iniciarAposSalvar) ? Date.now() : null;
-        return { ...prev, equipe: [...equipeAtual, { nome, entradaMs }] };
+        return { ...prev, equipe: [...equipeAtual, { nome, entradaMs, status: 'Ativo', tempoPausadoMs: 0, inicioPausaMs: null }] };
       }
     });
   };
@@ -345,6 +349,43 @@ export default function Painel() {
     }
   };
 
+  // Alterna o status de pausa de um único colaborador
+  const alternarPausaIndividual = async (demandaId, colabNome, atualStatus) => {
+    const demanda = demandas.find(d => d.id === demandaId);
+    if (!demanda) return;
+
+    const novaEquipe = demanda.equipe.map(c => {
+      let nomeObj = typeof c === 'string' ? c : c.nome;
+      if (nomeObj !== colabNome) return c;
+
+      // Mantém retrocompatibilidade transformando strings antigas em objetos completos
+      let colabAtualizado = typeof c === 'string' 
+        ? { nome: c, entradaMs: demanda.horaInicioStr, status: 'Ativo', tempoPausadoMs: 0, inicioPausaMs: null } 
+        : { ...c };
+
+      if (atualStatus === 'Ativo') {
+        // Aplica a pausa individual
+        colabAtualizado.status = 'Pausado';
+        colabAtualizado.inicioPausaMs = Date.now();
+      } else {
+        // Retoma a atividade e contabiliza o tempo que ficou fora
+        const tempoDestaPausa = Date.now() - (colabAtualizado.inicioPausaMs || Date.now());
+        colabAtualizado.status = 'Ativo';
+        colabAtualizado.tempoPausadoMs = (colabAtualizado.tempoPausadoMs || 0) + tempoDestaPausa;
+        colabAtualizado.inicioPausaMs = null;
+      }
+      return colabAtualizado;
+    });
+
+    try {
+      await updateDoc(doc(db, 'romaneios_ativos', demandaId), { equipe: novaEquipe });
+      // Atualiza o modal instantaneamente para não piscar a tela
+      setRomaneioDetalhes(prev => ({ ...prev, equipe: novaEquipe }));
+    } catch (error) {
+      console.error("Erro ao pausar colaborador:", error);
+    }
+  };
+
   const calcularDetalhesEquipe = (d) => {
     if (!d || !d.equipe || d.equipe.length === 0) return [];
     
@@ -386,8 +427,16 @@ export default function Painel() {
         if (decorrido > tempoTotalDecorridoMs) decorrido = tempoTotalDecorridoMs;
         if (decorrido < 0) decorrido = 0;
 
+        // --- NOVO: Subtrai o tempo de pausa individual ---
+        let msIndividualPausado = colab.tempoPausadoMs || 0;
+        if (colab.status === 'Pausado' && colab.inicioPausaMs) {
+          const fimPausa = d.status === 'Concluído' ? fimMs : agora;
+          msIndividualPausado += (fimPausa - colab.inicioPausaMs);
+        }
+
         const taxaAtiva = (tempoTotalDecorridoMs > 0) ? (tempoAtivoMs / tempoTotalDecorridoMs) : 1;
-        tempoTrabalhadoMs = decorrido * taxaAtiva;
+        tempoTrabalhadoMs = (decorrido * taxaAtiva) - msIndividualPausado;
+        if (tempoTrabalhadoMs < 0) tempoTrabalhadoMs = 0;
       }
 
       somaTempoTrabalhadoMs += tempoTrabalhadoMs;
@@ -933,20 +982,50 @@ export default function Painel() {
                     📊 Divisão de Pontuação (Proporcional)
                   </h4>
                   <div className="bg-white border border-slate-200 rounded-lg shadow-sm divide-y divide-slate-100">
-                    {calcularDetalhesEquipe(romaneioDetalhes).map(colab => (
-                      <div key={colab.nome} className="flex justify-between items-center p-3 text-sm">
-                        <div>
-                          <span className="font-black text-slate-800 uppercase">{colab.nome}</span>
-                          <span className="block text-[11px] text-slate-400 font-medium">
-                            Tempo Alocado: <span className="font-mono text-slate-600 font-bold">{formatarTempoMs(colab.tempoMs)}</span>
-                          </span>
+                    {calcularDetalhesEquipe(romaneioDetalhes).map(colab => {
+                      const colabOriginal = romaneioDetalhes.equipe.find(c => (typeof c === 'string' ? c : c.nome) === colab.nome);
+                      const statusIndividual = typeof colabOriginal === 'object' ? (colabOriginal.status || 'Ativo') : 'Ativo';
+                      const isPausado = statusIndividual === 'Pausado';
+
+                      return (
+                        <div key={colab.nome} className="flex justify-between items-center p-3 text-sm">
+                          <div>
+                            <span className="font-black text-slate-800 uppercase flex items-center gap-2">
+                              {colab.nome}
+                              {isPausado && (
+                                <span className="px-1.5 py-0.5 text-[9px] bg-amber-100 text-amber-800 border border-amber-200 rounded font-bold uppercase tracking-wider shadow-sm">
+                                  Em Pausa
+                                </span>
+                              )}
+                            </span>
+                            <span className="block text-[11px] text-slate-400 font-medium mt-0.5">
+                              Tempo Alocado: <span className="font-mono text-slate-600 font-bold">{formatarTempoMs(colab.tempoMs)}</span>
+                            </span>
+                          </div>
+                          
+                          <div className="flex items-center gap-6">
+                            {/* Botão aparece apenas se a demanda estiver em andamento global */}
+                            {romaneioDetalhes.status === 'Em Andamento' && (
+                              <button
+                                onClick={() => alternarPausaIndividual(romaneioDetalhes.id, colab.nome, statusIndividual)}
+                                className={`px-3 py-1.5 rounded text-[10px] font-black uppercase tracking-wider transition-colors border shadow-sm ${
+                                  isPausado 
+                                    ? 'bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-200' 
+                                    : 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200'
+                                }`}
+                              >
+                                {isPausado ? '▶ Retomar' : '⏸️ Pausar'}
+                              </button>
+                            )}
+                            
+                            <div className="text-right min-w-[70px]">
+                              <span className="text-base font-black text-blue-600 font-mono">+{Math.round(colab.pontos)}</span>
+                              <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest">PONTOS</span>
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-right">
-                          <span className="text-base font-black text-blue-600 font-mono">+{Math.round(colab.pontos)}</span>
-                          <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest">PONTOS</span>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 

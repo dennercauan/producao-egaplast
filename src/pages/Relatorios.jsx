@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, where, getDocs, onSnapshot, orderBy } from 'firebase/firestore';
+import { collection, query, orderBy, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -49,7 +49,10 @@ export default function Relatorios() {
           : doc.finalizadoEm; 
           
         const dentroDaData = dataFinalizacaoMs >= startMs && dataFinalizacaoMs <= endMs;
-        const passaFiltroColab = colaboradorSelecionado === 'Todos' || (doc.equipe && doc.equipe.includes(colaboradorSelecionado));
+        
+        // CORREÇÃO: Lê a equipe se ela for string (legado) ou objeto (novo modelo)
+        const passaFiltroColab = colaboradorSelecionado === 'Todos' || 
+          (doc.equipe && doc.equipe.some(c => (typeof c === 'string' ? c : c.nome) === colaboradorSelecionado));
 
         return dentroDaData && passaFiltroColab;
       });
@@ -66,11 +69,14 @@ export default function Relatorios() {
       const pausasExtraidas = [];
       docs.forEach(demanda => {
         if (demanda.historicoPausas && demanda.historicoPausas.length > 0) {
+          // CORREÇÃO: Formata a equipe mapeando nomes, lidando com ambos os formatos
+          const equipeFormatada = demanda.equipe ? demanda.equipe.map(c => typeof c === 'string' ? c : c.nome).join(', ') : '-';
+          
           demanda.historicoPausas.forEach(pausa => {
             pausasExtraidas.push({
               id: `${demanda.id}-${pausa.dataFim}`,
               item: demanda.item,
-              equipe: demanda.equipe ? demanda.equipe.join(', ') : '-',
+              equipe: equipeFormatada,
               motivo: pausa.motivo,
               duracaoMs: pausa.duracaoMs,
               data: new Date(pausa.dataFim).toLocaleDateString('pt-BR')
@@ -119,7 +125,6 @@ export default function Relatorios() {
     const dataFormatadaIn = dataInicio.split('-').reverse().join('-');
     const dataFormatadaFim = dataFim.split('-').reverse().join('-');
 
-    // Ajusta o nome para um formato seguro de arquivo (Ex: "Carlos_Oliveira" ou "Todos")
     const nomeFiltroArquivo = colaboradorSelecionado.replace(/\s+/g, '_');
 
     doc.setFontSize(22);
@@ -147,7 +152,8 @@ export default function Relatorios() {
         d.finalizadoEm?.toDate ? d.finalizadoEm.toDate().toLocaleDateString('pt-BR') : '-',
         d.item,
         d.quantidade.toString(),
-        d.equipe ? d.equipe.join(', ') : '-',
+        // CORREÇÃO: Formata a equipe para o PDF da Produtividade
+        d.equipe ? d.equipe.map(c => typeof c === 'string' ? c : c.nome).join(', ') : '-',
         d.tempoEstimadoStr,
         formatarTempoMs(d.tempoAtivoMs),
         formatarTempoMs(d.tempoPausadoTotalMs),
@@ -160,7 +166,6 @@ export default function Relatorios() {
         columnStyles: { 0: { cellWidth: 22 }, 2: { halign: 'center' }, 4: { halign: 'center' }, 5: { halign: 'center' }, 6: { halign: 'center' }, 7: { halign: 'center', fontStyle: 'bold' } }
       });
 
-      // NOVO NOME DINÂMICO DO ARQUIVO
       doc.save(`Produtividade_${nomeFiltroArquivo}_Egaplast_${dataFormatadaIn.replace(/\//g, '-')}_a_${dataFormatadaFim.replace(/\//g, '-')}.pdf`);
     
     } else {
@@ -194,7 +199,6 @@ export default function Relatorios() {
         columnStyles: { 0: { cellWidth: 25 }, 1: { cellWidth: 60 }, 3: { cellWidth: 80 }, 4: { halign: 'center', fontStyle: 'bold' } }
       });
 
-      // NOVO NOME DINÂMICO DO ARQUIVO
       doc.save(`Pausas_${nomeFiltroArquivo}_Egaplast_${dataFormatadaIn.replace(/\//g, '-')}_a_${dataFormatadaFim.replace(/\//g, '-')}.pdf`);
     }
   };
@@ -277,7 +281,11 @@ export default function Relatorios() {
                     dadosRelatorio.map((demanda) => (
                       <tr key={demanda.id} className="hover:bg-gray-50">
                         <td className="px-6 py-3 font-medium">{demanda.finalizadoEm?.toDate ? demanda.finalizadoEm.toDate().toLocaleDateString('pt-BR') : '-'}</td>
-                        <td className="px-6 py-3"><p className="font-semibold text-gray-900">{demanda.item}</p><p className="text-xs text-gray-500">{demanda.equipe?.join(', ')}</p></td>
+                        <td className="px-6 py-3">
+                          <p className="font-semibold text-gray-900">{demanda.item}</p>
+                          {/* CORREÇÃO: Formata a equipe para exibição no HTML da Produtividade */}
+                          <p className="text-xs text-gray-500">{demanda.equipe?.map(c => typeof c === 'string' ? c : c.nome).join(', ')}</p>
+                        </td>
                         <td className="px-6 py-3 text-center font-semibold">{demanda.quantidade}</td>
                         <td className="px-6 py-3 text-center font-bold text-gray-500">{demanda.tempoEstimadoStr}</td>
                         <td className="px-6 py-3 text-center font-mono font-bold text-blue-700">{formatarTempoMs(demanda.tempoAtivoMs)}</td>

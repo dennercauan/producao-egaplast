@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, orderBy, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
-import { useNavigate } from 'react-router-dom'; // <-- Novo import de navegação
+import { useNavigate } from 'react-router-dom';
 import logoEgaplast from '../assets/logo-egaplast.png';
 
 export default function Visor() {
   const [demandas, setDemandas] = useState([]);
   const [agora, setAgora] = useState(Date.now());
   const [horaAtual, setHoraAtual] = useState('');
+  const [dataAtual, setDataAtual] = useState(''); // <-- Adicione esta linha
   
-  const [visaoDireita, setVisaoDireita] = useState('ranking');
+  const [indiceTela, setIndiceTela] = useState(0);
 
   const [alerta, setAlerta] = useState({ show: false, tipo: '', item: '' });
   
@@ -17,7 +18,7 @@ export default function Visor() {
   const prevAtivosIds = useRef(new Set());
   const prevConcluidosIds = useRef(new Set());
   
-  const navigate = useNavigate(); // <-- Inicializando o navegador
+  const navigate = useNavigate();
 
   useEffect(() => {
     const qRomaneios = query(collection(db, 'romaneios_ativos'), orderBy('criadoEm', 'desc'));
@@ -53,16 +54,23 @@ export default function Visor() {
       const now = new Date();
       setAgora(now.getTime());
       setHoraAtual(now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      
+      // Nova formatação de data por extenso
+      const dia = String(now.getDate()).padStart(2, '0');
+      const meses = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+      const mes = meses[now.getMonth()];
+      const ano = now.getFullYear();
+      setDataAtual(`${dia} de ${mes} de ${ano}`);
     }, 1000);
 
-    const alternadorAbas = setInterval(() => {
-      setVisaoDireita(prev => prev === 'ranking' ? 'concluidos' : 'ranking');
-    }, 10000);
+    const alternadorTelas = setInterval(() => {
+      setIndiceTela(prev => prev + 1);
+    }, 10000); // Gira a tela a cada 10 segundos
 
     return () => {
       unsub();
       clearInterval(timer);
-      clearInterval(alternadorAbas);
+      clearInterval(alternadorTelas);
     };
   }, []);
 
@@ -108,16 +116,14 @@ export default function Visor() {
       if (tempoRealMin > 0) eficiencia = tempoEstMin / tempoRealMin;
       if (eficiencia > 3) eficiencia = 3; 
 
-      // Pontos totais gerados pela demanda ("A Pizza")
       const pontosTotais = tempoEstMin * eficiencia;
 
       let somaTempoTrabalhadoMs = 0;
       const temposIndividuais = [];
 
-      // 1. Mapeia o esforço de cada um e soma o total
       d.equipe.forEach(colab => {
         let nome = typeof colab === 'string' ? colab : colab.nome;
-        let tempoTrabalhadoMs = d.tempoAtivoMs || 0; // Padrão para dados antigos
+        let tempoTrabalhadoMs = d.tempoAtivoMs || 0; 
 
         if (typeof colab === 'object' && colab.entradaMs) {
           const fimMs = d.finalizadoEm ? (d.finalizadoEm.toDate ? d.finalizadoEm.toDate().getTime() : new Date(d.finalizadoEm).getTime()) : Date.now();
@@ -126,16 +132,21 @@ export default function Visor() {
           if (decorrido > d.tempoTotalDecorridoMs) decorrido = d.tempoTotalDecorridoMs;
           if (decorrido < 0) decorrido = 0;
 
-          // Desconta as pausas globais para achar o tempo ativo líquido da pessoa
+          let msIndividualPausado = colab.tempoPausadoMs || 0;
+          if (colab.status === 'Pausado' && colab.inicioPausaMs) {
+            const fimPausa = d.finalizadoEm ? fimMs : Date.now();
+            msIndividualPausado += (fimPausa - colab.inicioPausaMs);
+          }
+
           const taxaAtiva = (d.tempoTotalDecorridoMs > 0) ? (d.tempoAtivoMs / d.tempoTotalDecorridoMs) : 1;
-          tempoTrabalhadoMs = decorrido * taxaAtiva;
+          tempoTrabalhadoMs = (decorrido * taxaAtiva) - msIndividualPausado;
+          if (tempoTrabalhadoMs < 0) tempoTrabalhadoMs = 0;
         }
 
         somaTempoTrabalhadoMs += tempoTrabalhadoMs;
         temposIndividuais.push({ nome, tempoTrabalhadoMs });
       });
 
-      // 2. Distribui os pontos baseado na fatia de esforço
       temposIndividuais.forEach(ind => {
         if (!pontuacoes[ind.nome]) pontuacoes[ind.nome] = { nome: ind.nome, pontos: 0, entregas: 0 };
         
@@ -144,7 +155,6 @@ export default function Visor() {
           const fatia = ind.tempoTrabalhadoMs / somaTempoTrabalhadoMs;
           pontosGanhos = pontosTotais * fatia;
         } else {
-          // Fallback de segurança 
           pontosGanhos = pontosTotais / d.equipe.length;
         }
 
@@ -153,9 +163,23 @@ export default function Visor() {
       });
     });
 
-    return Object.values(pontuacoes).sort((a, b) => b.pontos - a.pontos).slice(0, 5);
+    return Object.values(pontuacoes).sort((a, b) => b.pontos - a.pontos);
   };
+
   const ranking = calcularRanking();
+  
+  // ---- LÓGICA DE PAGINAÇÃO AUTOMÁTICA DA TV ----
+  const itensPorPagina = 5;
+  const totalPaginasRanking = Math.ceil(ranking.length / itensPorPagina) || 1;
+  const totalTelas = totalPaginasRanking + 1; // +1 reserva a última tela para os 'Concluídos'
+  
+  const telaAtualSegura = indiceTela % totalTelas;
+  const isTelaConcluidos = telaAtualSegura === totalPaginasRanking;
+  const paginaRankingExibida = isTelaConcluidos ? 0 : telaAtualSegura;
+  
+  const rankingPaginado = ranking.slice(paginaRankingExibida * itensPorPagina, (paginaRankingExibida + 1) * itensPorPagina);
+  // ----------------------------------------------
+
   const ultimosConcluidos = concluidosHoje.slice(0, 4);
 
   let gridConfigClass = "grid-cols-2 content-start"; 
@@ -197,7 +221,6 @@ export default function Visor() {
       {/* HEADER CLARO */}
       <header className="bg-white px-8 py-4 flex justify-between items-center shadow-sm border-b border-slate-200 shrink-0 z-10">
         <div className="flex items-center gap-6">
-          {/* Logo agora é clicável e direciona para o Painel */}
           <img 
             src={logoEgaplast} 
             alt="Egaplast" 
@@ -220,8 +243,11 @@ export default function Visor() {
             <span className="block text-xs text-emerald-600 font-bold uppercase tracking-widest">Peças Hoje</span>
             <span className="text-3xl font-black text-slate-800">{totalPecasHoje}</span>
           </div>
-          <div className="text-right ml-4">
-            <p className="text-5xl font-black tracking-tighter text-blue-600 font-mono">
+          <div className="text-right ml-4 flex flex-col items-end">
+            <span className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-1">
+              {dataAtual}
+            </span>
+            <p className="text-5xl font-black tracking-tighter text-blue-600 font-mono leading-none">
               {horaAtual}
             </p>
           </div>
@@ -317,32 +343,40 @@ export default function Visor() {
         </div>
 
         <div className="flex-[1] flex flex-col bg-white rounded-xl border border-slate-200 p-6 overflow-hidden shadow-md h-full relative">
-          <div key={visaoDireita} className="flex-1 flex flex-col h-full overflow-hidden animate-slide-fade">
+          <div key={telaAtualSegura} className="flex-1 flex flex-col h-full overflow-hidden animate-slide-fade">
             
-            {visaoDireita === 'ranking' && (
+            {!isTelaConcluidos && (
               <>
                 <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4 shrink-0">
                   <span className="text-2xl">🏆</span>
-                  <h2 className="text-xl font-black text-slate-800 uppercase">Ranking</h2>
+                  <h2 className="text-xl font-black text-slate-800 uppercase flex items-center gap-2">
+                    Ranking 
+                    {totalPaginasRanking > 1 && (
+                      <span className="text-slate-400 text-sm font-bold tracking-widest bg-slate-100 px-2 py-0.5 rounded">
+                         {paginaRankingExibida + 1}/{totalPaginasRanking}
+                      </span>
+                    )}
+                  </h2>
                 </div>
 
                 <div className="flex-1 flex flex-col gap-3 overflow-hidden">
-                  {ranking.length === 0 ? (
+                  {rankingPaginado.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-slate-400 text-center px-4">
                       <span className="text-4xl mb-4">📊</span>
                       <p className="text-sm font-bold uppercase tracking-wider">Aguardando...</p>
                     </div>
                   ) : (
-                    ranking.map((colab, index) => {
-                      const isTop1 = index === 0;
+                    rankingPaginado.map((colab, idx) => {
+                      const indexReal = (paginaRankingExibida * itensPorPagina) + idx;
+                      const isTop1 = indexReal === 0;
                       const bgClass = isTop1 ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200';
                       const textColor = isTop1 ? 'text-slate-900' : 'text-slate-700';
-                      const positionColor = index === 0 ? 'text-amber-500' : index === 1 ? 'text-slate-400' : index === 2 ? 'text-orange-400' : 'text-slate-300';
+                      const positionColor = indexReal === 0 ? 'text-amber-500' : indexReal === 1 ? 'text-slate-400' : indexReal === 2 ? 'text-orange-400' : 'text-slate-300';
 
                       return (
                         <div key={colab.nome} className={`flex items-center p-3 rounded-lg border ${bgClass} shadow-sm`}>
                           <div className={`text-3xl font-black w-10 text-center mr-3 italic ${positionColor}`}>
-                            {index + 1}
+                            {indexReal + 1}
                           </div>
                           <div className="flex-1 min-w-0">
                             <h3 className="text-base font-black uppercase truncate text-slate-800">{colab.nome}</h3>
@@ -362,7 +396,7 @@ export default function Visor() {
               </>
             )}
 
-            {visaoDireita === 'concluidos' && (
+            {isTelaConcluidos && (
               <>
                 <div className="flex items-center gap-3 mb-6 border-b border-slate-100 pb-4 shrink-0">
                   <span className="text-2xl">✅</span>
